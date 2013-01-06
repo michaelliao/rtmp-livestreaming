@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 # Copyright (c) 2007-2009, Mamta Singh. All rights reserved. see README for details.
 # Copyright (c) 2010-2011, Kundan Singh.
 
@@ -715,6 +718,15 @@ class FLV(object):
             self.tsr, ts = ts, ts - self.tsr0
             # if message.type == Message.AUDIO: print 'w', message.type, ts
             data = struct.pack('>BBHBHB', message.type, (length >> 16) & 0xff, length & 0x0ffff, (ts >> 16) & 0xff, ts & 0x0ffff, (ts >> 24) & 0xff) + '\x00\x00\x00' +  message.data
+            # write to a seperate flv debug file:
+            if not hasattr(self, 'tagindex'):
+                self.tagindex = 0
+            debugf = open('/tmp/flvdebug-%d' % self.tagindex, 'wb')
+            debugf.write(data)
+            debugf.close()
+            self.tagindex = self.tagindex + 1
+            # END debug
+
             data += struct.pack('>I', len(data))
             self.fp.write(data)
     
@@ -920,7 +932,6 @@ class Client(Protocol):
         self.streams[stream.id] = stream
         self._nextStreamId += 1
         return stream
-
 
 class Server(object):
     '''A RTMP server listens for incoming connections and informs the app.'''
