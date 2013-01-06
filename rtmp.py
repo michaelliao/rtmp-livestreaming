@@ -1050,32 +1050,39 @@ class Wirecast(App):
         return True
 
 class FlashServer(object):
+
     '''A RTMP server to record and stream Flash video.'''
+
     def __init__(self):
         '''Construct a new FlashServer. It initializes the local members.'''
-        self.sock = self.server = None;
-        self.apps = dict({'*': App, 'wirecast': Wirecast}) # supported applications: * means any as in {'*': App}
+        self.sock = self.server = None
+        self.apps = dict({'*': App}) # supported applications: * means any as in {'*': App}
         self.clients = dict()  # list of clients indexed by scope. First item in list is app instance.
-        self.root = '';
-        
+        self.root = ''
+
     def start(self, host='0.0.0.0', port=1935):
         '''This should be used to start listening for RTMP connections on the given port, which defaults to 1935.'''
         if not self.server:
             sock = self.sock = socket.socket(type=socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((host, port))
-            if _debug: print 'listening on ', sock.getsockname()
+            if _debug:
+                print 'listening on ', sock.getsockname()
             sock.listen(5)
             server = self.server = Server(sock) # start rtmp server on that socket
             multitask.add(self.serverlistener())
-    
+
     def stop(self):
-        if _debug: print 'stopping Flash server'
+        if _debug:
+            print 'stopping Flash server'
         if self.server and self.sock:
-            try: self.sock.close(); self.sock = None
-            except: pass
+            try:
+                self.sock.close()
+                self.sock = None
+            except:
+                pass
         self.server = None
-        
+
     def serverlistener(self):
         '''Server listener (generator). It accepts all connections and invokes client listener'''
         try:
@@ -1126,31 +1133,38 @@ class FlashServer(object):
                             multitask.add(self.clientlistener(client)) # receive messages from client.
                         else: 
                             yield client.rejectConnection(reason='Rejected in onConnect')
-        except GeneratorExit: pass # terminate
-        except StopIteration: raise
-        except: 
-            if _debug: print 'serverlistener exception', traceback.print_exc()
-            
+        except GeneratorExit:
+            pass # terminate
+        except StopIteration:
+            raise
+        except:
+            if _debug:
+                print 'serverlistener exception', traceback.print_exc()
+
     def clientlistener(self, client):
         '''Client listener (generator). It receives a command and invokes client handler, or receives a new stream and invokes streamlistener.'''
         try:
             while True:
                 msg, arg = (yield client.recv())   # receive new message from client
                 if not msg:                   # if the client disconnected,
-                    if _debug: print 'connection closed from client'
+                    if _debug:
+                        print 'connection closed from client'
                     break                     #    come out of listening loop.
                 if msg == 'command':          # handle a new command
                     multitask.add(self.clienthandler(client, arg))
                 elif msg == 'stream':         # a new stream is created, handle the stream.
                     arg.client = client
                     multitask.add(self.streamlistener(arg))
-        except StopIteration: raise
+        except StopIteration:
+            raise
         except:
-            if _debug: print 'clientlistener exception', (sys and sys.exc_info() or None)
+            if _debug:
+                print 'clientlistener exception', (sys and sys.exc_info() or None)
         
         try:
             # client is disconnected, clear our state for application instance.
-            if _debug: print 'cleaning up client', client.path
+            if _debug:
+                print 'cleaning up client', client.path
             inst = None
             if client.path in self.clients:
                 inst = self.clients[client.path][0]
@@ -1163,10 +1177,12 @@ class FlashServer(object):
                 inst = self.clients[client.path][0]
                 inst._clients = None
                 del self.clients[client.path]
-            if inst is not None: inst.onDisconnect(client)
+            if inst is not None:
+                inst.onDisconnect(client)
         except: 
-            if _debug: print 'clientlistener exception', (sys and sys.exc_info() or None)
-            
+            if _debug:
+                print 'clientlistener exception', (sys and sys.exc_info() or None)
+
     def closehandler(self, stream):
         '''A stream is closed explicitly when a closeStream command is received from given client.'''
         if stream.client is not None:
@@ -1229,17 +1245,20 @@ class FlashServer(object):
                 if cmd.name == 'publish':
                     yield self.publishhandler(stream, cmd)
                 elif cmd.name == 'play':
-                    yield self.playhandler(stream, cmd)
+                    pass
                 elif cmd.name == 'closeStream':
                     self.closehandler(stream)
                 elif cmd.name == 'seek':
-                    yield self.seekhandler(stream, cmd) 
+                    pass
             else: # audio or video message
                 yield self.mediahandler(stream, message)
-        except GeneratorExit: pass
-        except StopIteration: raise
+        except GeneratorExit:
+            pass
+        except StopIteration:
+            raise
         except: 
-            if _debug: print 'exception in streamhandler', (sys and sys.exc_info())
+            if _debug:
+                print 'exception in streamhandler', (sys and sys.exc_info())
     
     def publishhandler(self, stream, cmd):
         '''A new stream is published. Store the information in the application instance.'''
@@ -1262,71 +1281,6 @@ class FlashServer(object):
             response = Command(name='onStatus', id=cmd.id, tm=stream.client.relativeTime, args=[amf.Object(level='error',code='NetStream.Publish.BadName',description=str(E),details=None)])
             yield stream.send(response)
 
-    def playhandler(self, stream, cmd):
-        '''A new stream is being played. Just updated the players list with this stream.'''
-        try:
-            inst = self.clients[stream.client.path][0]
-            name = stream.name = cmd.args[0]  # store the stream's name
-            if stream.name and '?' in stream.name: name = stream.name = stream.name.partition('?')[0]
-            start = cmd.args[1] if len(cmd.args) >= 2 else -2
-            if name not in inst.players:
-                inst.players[name] = [] # initialize the players for this stream name
-            if stream not in inst.players[name]: # store the stream as players of this name
-                inst.players[name].append(stream)
-            task = None
-            if start >= 0 or start == -2 and name not in inst.publishers:
-                stream.playfile = inst.getfile(stream.client.path, stream.name, self.root, 'play')
-                if stream.playfile:
-                    if start > 0: stream.playfile.seek(start)
-                    task = stream.playfile.reader(stream)
-                elif start >= 0: raise ValueError, 'Stream name not found'
-            if _debug: print 'playing stream=', name, 'start=', start
-            inst.onPlay(stream.client, stream)
-            
-            # Default chunk size is 128. It is pretty small when we stream high audio and video quality.
-            # So, send the choosen chunk size to flash client.
-            stream.client.writeChunkSize = Protocol.HIGH_WRITE_CHUNK_SIZE
-            m0 = Message() # SetChunkSize
-            m0.time, m0.type, m0.data = stream.client.relativeTime, Message.CHUNK_SIZE, struct.pack('>L', stream.client.writeChunkSize)
-            yield stream.client.writeMessage(m0)
-            
-#            m1 = Message() # UserControl/StreamIsRecorded
-#            m1.time, m1.type, m1.data = stream.client.relativeTime, Message.USER_CONTROL, struct.pack('>HI', 4, stream.id)
-#            yield stream.client.writeMessage(m1)
-            
-            m2 = Message() # UserControl/StreamBegin
-            m2.time, m2.type, m2.data = stream.client.relativeTime, Message.USER_CONTROL, struct.pack('>HI', 0, stream.id)
-            yield stream.client.writeMessage(m2)
-            
-#            response = Command(name='onStatus', id=cmd.id, args=[amf.Object(level='status',code='NetStream.Play.Reset', description=stream.name, details=None)])
-#            yield stream.send(response)
-            
-            response = Command(name='onStatus', id=cmd.id, tm=stream.client.relativeTime, args=[amf.Object(level='status',code='NetStream.Play.Start', description=stream.name, details=None)])
-            yield stream.send(response)
-            
-#            response = Command(name='onStatus', id=cmd.id, tm=stream.client.relativeTime, args=[amf.Object(level='status',code='NetStream.Play.PublishNotify', description=stream.name, details=None)])
-#            yield stream.send(response)
-            
-            if task is not None: multitask.add(task)
-        except ValueError, E: # some error occurred. inform the app.
-            if _debug: print 'error in playing stream', str(E)
-            response = Command(name='onStatus', id=cmd.id, tm=stream.client.relativeTime, args=[amf.Object(level='error',code='NetStream.Play.StreamNotFound',description=str(E),details=None)])
-            yield stream.send(response)
-            
-    def seekhandler(self, stream, cmd):
-        '''A stream is seeked to a new position. This is allowed only for play from a file.'''
-        try:
-            offset = cmd.args[0]
-            if stream.playfile is None or stream.playfile.type != 'read': 
-                raise ValueError, 'Stream is not seekable'
-            stream.playfile.seek(offset)
-            response = Command(name='onStatus', id=cmd.id, tm=stream.client.relativeTime, args=[amf.Object(level='status',code='NetStream.Seek.Notify', description=stream.name, details=None)])
-            yield stream.send(response)
-        except ValueError, E: # some error occurred. inform the app.
-            if _debug: print 'error in seeking stream', str(E)
-            response = Command(name='onStatus', id=cmd.id, tm=stream.client.relativeTime, args=[amf.Object(level='error',code='NetStream.Seek.Failed',description=str(E),details=None)])
-            yield stream.send(response)
-            
     def mediahandler(self, stream, message):
         '''Handle incoming media on the stream, by sending to other stream in this application instance.'''
         if stream.client is not None:
@@ -1345,13 +1299,13 @@ class FlashServer(object):
 # The main routine to start, run and stop the service
 if __name__ == '__main__':
     from optparse import OptionParser
-    parser = OptionParser(version='SVN $Revision: 164 $, $Date: 2012-10-09 06:08:44 +0800 (Tue, 09 Oct 2012) $'.replace('$', ''))
+    parser = OptionParser(version='0.1')
     parser.add_option('-i', '--host',    dest='host',    default='0.0.0.0', help="listening IP address. Default '0.0.0.0'")
     parser.add_option('-p', '--port',    dest='port',    default=1935, type="int", help='listening port number. Default 1935')
     parser.add_option('-r', '--root',    dest='root',    default='./',       help="document path prefix. Directory must end with /. Default './'")
     parser.add_option('-d', '--verbose', dest='verbose', default=False, action='store_true', help='enable debug trace')
     (options, args) = parser.parse_args()
-    
+
     _debug = options.verbose
     try:
         agent = FlashServer()
