@@ -960,7 +960,7 @@ class Auth(object):
     def __init__(self):
         pass
 
-    def authenticate(**kw):
+    def authenticate(self, **kw):
         return True
 
 class App(object):
