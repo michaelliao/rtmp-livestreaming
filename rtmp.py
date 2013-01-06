@@ -629,12 +629,9 @@ class Command(object):
         output.close()
         return msg
 
-def getfilename(path, name, root):
-    '''return the file name for the given stream. The name is derived as root/scope/name.flv where scope is
-    the the path present in the path variable.'''
-    ignore, ignore, scope = path.partition('/')
-    if scope: scope = scope + '/'
-    result = root + scope + name + '.flv'
+def getfilename(root, stream_id):
+    'return the file name for the given stream. The name is derived as root/stream_id.flv '
+    result = '%s%s.flv' % (root, stream_id)
     if _debug: print 'filename=', result
     return result
 
@@ -644,7 +641,7 @@ class FLV(object):
         self.fname = self.fp = self.type = None
         self.tsp = self.tsr = 0; self.tsr0 = None
     
-    def open(self, path, type='read', mode=0775):
+    def open(self, path, type='record', mode=0775):
         '''Open the file for reading (type=read) or writing (type=record or append).'''
         if str(path).find('/../') >= 0 or str(path).find('\\..\\') >= 0: raise ValueError('Must not contain .. in name')
         if _debug: print 'opening file', path
@@ -796,8 +793,12 @@ class Stream(object):
         
     def close(self):
         if _debug: print self, 'closing'
-        if self.recordfile is not None: self.recordfile.close(); self.recordfile = None
-        if self.playfile is not None: self.playfile.close(); self.playfile = None
+        if self.recordfile is not None:
+            self.recordfile.close()
+            self.recordfile = None
+        if self.playfile is not None:
+            self.playfile.close()
+            self.playfile = None
         self.client = None # to clear the reference
         pass
     
@@ -956,18 +957,30 @@ class Server(object):
             yield self.queue.put((None, None))
             self.queue = None
 
-class Auth(object):
+class AuthInfo(object):
+    __slots__ = ('id', 'start_time', 'end_time')
+
+    def __init__(self, **kw):
+        for k, v in kw.iteritems():
+            if k in AuthInfo.__slots__:
+                setattr(self, k, v)
+            else:
+                setattr(self, k, None)
+
+class AuthHandler(object):
     def __init__(self):
         pass
 
     def authenticate(self, **kw):
-        return True
+        return AuthInfo(id='A12345', start_time=None)
+
+auth_handler = AuthHandler()
 
 class App(object):
     '''An application instance containing any number of streams. Except for constructor all methods are generators.'''
     count = 0
     def __init__(self):
-        self.auth = Auth()
+        self.auth_info = None
         self.name = str(self.__class__.__name__) + '[' + str(App.count) + ']'; App.count += 1
         self.players, self.publishers, self._clients = {}, {}, [] # Streams indexed by stream name, and list of clients
         if _debug: print self.name, 'created'
@@ -986,7 +999,8 @@ class App(object):
             qs = cgi.parse_qs(client.path[n+1:], keep_blank_values=True)
             for k, w in qs.iteritems():
                 kw[k] = w[0]
-        return self.auth.authenticate(**kw)
+        self.auth_info = auth_handler.authenticate(**kw)
+        return self.auth_info is not None
 
     def onDisconnect(self, client):
         if _debug: print self.name, 'onDisconnect', client.path
@@ -1009,13 +1023,13 @@ class App(object):
     def onPlayData(self, client, stream, message):
         return True # should return True so that data will be actually played in that stream
     def getfile(self, path, name, root, mode):
-        if mode == 'play':
-            path = getfilename(path, name, root)
-            if not os.path.exists(path): return None
-            return FLV().open(path)
-        elif mode in ('record', 'append'):
-            path = getfilename(path, name, root)
-            return FLV().open(path, mode)
+        #if mode == 'play':
+        #    path = getfilename(root, self.id)
+        #    if not os.path.exists(path): return None
+        #    return FLV().open(path)
+        if mode=='record': # in ('record', 'append'):
+            path = getfilename(root, self.auth_info.id)
+            return FLV().open(path, 'record')
 #        elif stream.mode == 'live': FLV().delete(path) # TODO: this is commented out to avoid accidental delete
         return None
 
@@ -1279,7 +1293,7 @@ class FlashServer(object):
     def publishhandler(self, stream, cmd):
         '''A new stream is published. Store the information in the application instance.'''
         try:
-            stream.mode = 'live' if len(cmd.args) < 2 else cmd.args[1] # live, record, append
+            stream.mode = 'record' #if len(cmd.args) < 2 else cmd.args[1] # live, record, append
             stream.name = cmd.args[0]
             if _debug: print 'publishing stream=', stream.name, 'mode=', stream.mode
             if stream.name and '?' in stream.name: stream.name = stream.name.partition('?')[0]
@@ -1324,8 +1338,11 @@ if __name__ == '__main__':
 
     _debug = options.verbose
     try:
+        root_dir = os.path.abspath(options.root)
+        if not root_dir.endswith('/'):
+            root_dir = root_dir + '/'
         agent = FlashServer()
-        agent.root = options.root
+        agent.root = root_dir
         agent.start(options.host, options.port)
         if _debug: print time.asctime(), 'Flash Server Starts - %s:%d' % (options.host, options.port)
         multitask.run()
