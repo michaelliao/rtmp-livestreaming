@@ -61,7 +61,7 @@ throw an exception and display the error message.
 
 '''
 
-import os, sys, time, struct, socket, traceback, multitask, amf, hashlib, hmac, random
+import os, sys, cgi, time, struct, socket, traceback, multitask, amf, hashlib, hmac, random
 
 _debug = False
 
@@ -956,10 +956,18 @@ class Server(object):
             yield self.queue.put((None, None))
             self.queue = None
 
+class Auth(object):
+    def __init__(self):
+        pass
+
+    def authenticate(**kw):
+        return True
+
 class App(object):
     '''An application instance containing any number of streams. Except for constructor all methods are generators.'''
     count = 0
     def __init__(self):
+        self.auth = Auth()
         self.name = str(self.__class__.__name__) + '[' + str(App.count) + ']'; App.count += 1
         self.players, self.publishers, self._clients = {}, {}, [] # Streams indexed by stream name, and list of clients
         if _debug: print self.name, 'created'
@@ -971,7 +979,15 @@ class App(object):
         return self._clients[1:] if self._clients is not None else []
     def onConnect(self, client, *args):
         if _debug: print self.name, 'onConnect', client.path
-        return True
+        # get args from path:
+        kw = dict()
+        n = client.path.find('?')
+        if n!=(-1):
+            qs = cgi.parse_qs(client.path[n+1:], keep_blank_values=True)
+            for k, w in qs.iteritems():
+                kw[k] = w[0]
+        return self.auth.authenticate(**kw)
+
     def onDisconnect(self, client):
         if _debug: print self.name, 'onDisconnect', client.path
     def onPublish(self, client, stream):
