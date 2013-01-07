@@ -35,7 +35,10 @@ nosetests.xml
 .project
 .pydevproject
 
+*.aac
+*.h264
 *.flv
 *.ts
 *.m3u8
+.DS_Store
 
