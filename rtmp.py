@@ -66,6 +66,8 @@ throw an exception and display the error message.
 
 import os, sys, cgi, time, struct, socket, traceback, multitask, amf, hashlib, hmac, random
 
+from handler import TsHandler
+
 _debug = False
 
 class ConnectionClosed:
@@ -640,96 +642,25 @@ def getfilename(root, stream_id):
 
 class FLV(object):
     '''An FLV file which converts between RTMP message and FLV tags.'''
-    def __init__(self):
-        self.fname = self.fp = self.type = None
+    def __init__(self, tshandler):
+        # self.fname = self.fp = self.type = None
+        self.tshandler = tshandler
         self.tsp = self.tsr = 0; self.tsr0 = None
-    
-    def open(self, path, type='record', mode=0775):
-        '''Open the file for reading (type=read) or writing (type=record or append).'''
-        if str(path).find('/../') >= 0 or str(path).find('\\..\\') >= 0: raise ValueError('Must not contain .. in name')
-        if _debug: print 'opening file', path
-        self.tsp = self.tsr = 0; self.tsr0 = None; self.tsr1 = 0; self.type = type
-        if type in ('record', 'append'):
-            try: os.makedirs(os.path.dirname(path), mode)
-            except: pass
-            if type == 'record' or not os.path.exists(path): # if file does not exist, use record mode
-                self.fp = open(path, 'w+b')
-                self.fp.write('FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00') # the header and first previousTagSize
-                self.writeDuration(0.0)
-            else:
-                self.fp = open(path, 'r+b')
-                self.fp.seek(-4, os.SEEK_END)
-                ptagsize, = struct.unpack('>I', self.fp.read(4))
-                self.fp.seek(-4-ptagsize, os.SEEK_END)
-                bytes = self.fp.read(ptagsize)
-                type, len0, len1, ts0, ts1, ts2, sid0, sid1 = struct.unpack('>BBHBHBBH', bytes[:11])
-                ts = (ts0 << 16) | (ts1 & 0x0ffff) | (ts2 << 24)
-                self.tsr1 = ts + 20; # some offset after the last packet
-                self.fp.seek(0, os.SEEK_END)
-        else: 
-            self.fp = open(path, 'rb')
-            magic, version, flags, offset = struct.unpack('!3sBBI', self.fp.read(9))
-            if _debug: print 'FLV.open() hdr=', magic, version, flags, offset
-            if magic != 'FLV': raise ValueError('This is not a FLV file')
-            if version != 1: raise ValueError('Unsupported FLV file version')
-            if offset > 9: self.fp.seek(offset-9, os.SEEK_CUR)
-            self.fp.read(4) # ignore first previous tag size
-        return self 
-    
-    def close(self):
-        '''Close the underlying file for this object.'''
-        if _debug: print 'closing flv file'
-        if self.type in ('record', 'append') and self.tsr0 is not None:
-            self.writeDuration((self.tsr - self.tsr0)/1000.0)
-        if self.fp is not None: 
-            try: self.fp.close()
-            except: pass
-            self.fp = None
-    
-    def delete(self, path):
-        '''Delete the underlying file for this object.'''
-        try: os.unlink(path)
-        except: pass
-        
-    def writeDuration(self, duration):
-        if _debug: print 'writing duration', duration
-        output = amf.BytesIO()
-        amfWriter = amf.AMF0(output) # TODO: use AMF3 if needed
-        amfWriter.write('onMetaData')
-        amfWriter.write({"duration": duration, "videocodecid": 2})
-        output.seek(0); data = output.read()
-        length, ts = len(data), 0
-        data = struct.pack('>BBHBHB', Message.DATA, (length >> 16) & 0xff, length & 0x0ffff, (ts >> 16) & 0xff, ts & 0x0ffff, (ts >> 24) & 0xff) + '\x00\x00\x00' +  data
-        data += struct.pack('>I', len(data))
-        lastpos = self.fp.tell()
-        if lastpos != 13: self.fp.seek(13, os.SEEK_SET)
-        self.fp.write(data)
-        if lastpos != 13: self.fp.seek(lastpos, os.SEEK_SET)
-        
+        self.tsr1 = 0
+
+    def endProcess(self):
+        self.tshandler.endProcess()
+
     def write(self, message):
         '''Write a message to the file, assuming it was opened for writing or appending.'''
-#        if message.type == Message.VIDEO:
-#            self.videostarted = True
-#        elif not hasattr(self, "videostarted"): return
         if message.type == Message.AUDIO or message.type == Message.VIDEO:
             length, ts = message.size, message.time
             #if _debug: print 'FLV.write()', message.type, ts
             if self.tsr0 is None: self.tsr0 = ts - self.tsr1
             self.tsr, ts = ts, ts - self.tsr0
-            # if message.type == Message.AUDIO: print 'w', message.type, ts
             data = struct.pack('>BBHBHB', message.type, (length >> 16) & 0xff, length & 0x0ffff, (ts >> 16) & 0xff, ts & 0x0ffff, (ts >> 24) & 0xff) + '\x00\x00\x00' +  message.data
-            # write to a seperate flv debug file:
-            if not hasattr(self, 'tagindex'):
-                self.tagindex = 0
-            debugf = open('/tmp/flvdebug-%d' % self.tagindex, 'wb')
-            debugf.write(data)
-            debugf.close()
-            self.tagindex = self.tagindex + 1
-            # END debug
+            self.tshandler.processTag(data)
 
-            data += struct.pack('>I', len(data))
-            self.fp.write(data)
-    
     def reader(self, stream):
         '''A generator to periodically read the file and dispatch them to the stream. The supplied stream
         object must have a send(Message) method and id and client properties.'''
@@ -772,26 +703,6 @@ class FLV(object):
                 try: self.fp.close()
                 except: pass
                 self.fp = None
-            
-    def seek(self, offset):
-        '''For file reader, try seek to the given time. The offset is in millisec'''
-        if self.type == 'read':
-            if _debug: print 'FLV.seek() offset=', offset, 'current tsp=', self.tsp
-            self.fp.seek(0, os.SEEK_SET)
-            magic, version, flags, length = struct.unpack('!3sBBI', self.fp.read(9))
-            if length > 9: self.fp.seek(length-9, os.SEEK_CUR)
-            self.fp.seek(4, os.SEEK_CUR) # ignore first previous tag size
-            self.tsp, ts = int(offset), 0
-            while self.tsp > 0 and ts < self.tsp:
-                bytes = self.fp.read(11)
-                if not bytes: break
-                type, len0, len1, ts0, ts1, ts2, sid0, sid1 = struct.unpack('>BBHBHBBH', bytes)
-                length = (len0 << 16) | len1; ts = (ts0 << 16) | (ts1 & 0x0ffff) | (ts2 << 24)
-                self.fp.seek(length, os.SEEK_CUR)
-                ptagsize, = struct.unpack('>I', self.fp.read(4))
-                if ptagsize != (length+11): break
-            if _debug: print 'FLV.seek() new ts=', ts, 'tell', self.fp.tell()
-                
         
 class Stream(object):
     '''The stream object that is used for RTMP stream.'''
@@ -1033,16 +944,6 @@ class App(object):
         return True # should return True so that the data is actually published in that stream
     def onPlayData(self, client, stream, message):
         return True # should return True so that data will be actually played in that stream
-    def getfile(self, path, name, root, mode):
-        #if mode == 'play':
-        #    path = getfilename(root, self.id)
-        #    if not os.path.exists(path): return None
-        #    return FLV().open(path)
-        if mode=='record': # in ('record', 'append'):
-            path = getfilename(root, self.auth_info.id)
-            return FLV().open(path, 'record')
-#        elif stream.mode == 'live': FLV().delete(path) # TODO: this is commented out to avoid accidental delete
-        return None
 
 class Wirecast(App):
     '''A wrapper around App to workaround with wirecast publisher which does not send AVC seq periodically. It defines new stream variables
@@ -1276,7 +1177,7 @@ class FlashServer(object):
                 multitask.add(self.streamhandler(stream, msg))
         except: 
             if _debug: print 'streamlistener exception', (sys and sys.exc_info() or None)
-            
+
     def streamhandler(self, stream, message):
         '''A generator to handle a single message on the stream.'''
         try:
@@ -1314,7 +1215,8 @@ class FlashServer(object):
             inst.publishers[stream.name] = stream # store the client for publisher
             inst.onPublish(stream.client, stream)
             
-            stream.recordfile = inst.getfile(stream.client.path, stream.name, self.root, stream.mode)
+            #stream.recordfile = inst.getfile(stream.client.path, stream.name, self.root, stream.mode)
+            stream.recorder = FLV(TsHandler())
             response = Command(name='onStatus', id=cmd.id, tm=stream.client.relativeTime, args=[amf.Object(level='status', code='NetStream.Publish.Start', description='', details=None)])
             yield stream.send(response)
         except ValueError, E: # some error occurred. inform the app.
@@ -1334,8 +1236,7 @@ class FlashServer(object):
                     result = inst.onPlayData(s.client, s, m)
                     if result:
                         yield s.send(m)
-                if stream.recordfile is not None:
-                    stream.recordfile.write(message)
+                stream.recorder.write(message)
 
 # The main routine to start, run and stop the service
 if __name__ == '__main__':
