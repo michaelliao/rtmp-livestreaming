@@ -247,17 +247,19 @@ class H264Parser(object):
         if AVCPacketType==0:
             # See ISO 14496-15, 5.2.4.1 for the description of AVCDecoderConfigurationRecord.
             # This contains the same information that would be stored in an avcC box in an MP4/FLV file.
+            print 'Parse AVCDecoderConfigurationRecord'
             self._parse_config_record(s)
         elif AVCPacketType==1:
             # One or more NALUs (Full frames are required)
             self._parse_NALUs(s)
         elif AVCPacketType==2:
             # end of video:
-            pass
+            print 'END of video'
         else:
             raise FLVError('Bad AVCPacketType: %d' % AVCPacketType)
 
     def _parse_config_record(self, s):
+        hexline(s.left())
         # config_version:
         ver = s.read_uint8()
         if ver != 1:
@@ -312,6 +314,18 @@ class H264Parser(object):
         if data_available > 4:
             print hex(s.read_uint8()), hex(s.read_uint8()), hex(s.read_uint8()), hex(s.read_uint8())
 
+def hexline(s):
+    n = 0
+    for ch in s:
+        n = n + 1
+        s = hex(ord(ch))[2:] # remove prefix '0x'
+        if len(s)==1:
+            s = '0' + s
+        print s,
+        if n % 16==0:
+            print
+    print
+
 class PacketStream(object):
 
     def __init__(self):
@@ -319,6 +333,14 @@ class PacketStream(object):
 
     def getvalue(self):
         return self._buffer.getvalue()
+
+    def writePES(self, pid, stream_id, data):
+        # packet with pusi=1:
+        self._write_header(pusi=1, pid=pid, af=0x03, ccounter=0)
+        # write adaption fields length = 0x07:
+        self._buffer.write('\x07')
+        # write adaption flags = 0x50 '0101 0000'
+        self._buffer.write('\x50')
 
     def writePAT(self):
         self._write_header(pusi=1, pid=0, af=0x01)
@@ -401,14 +423,12 @@ class PacketStream(object):
         if n>0:
             self._buffer.write('\xff' * n)
 
-    def _write_header(self, pusi, pid, af):
+    def _write_header(self, pusi, pid, af, ccounter=0):
         # pusi=1 or 0:
         b1 = (pusi << 6) | ((pid & 0x1fff) >> 8) # pid higher 5 bit
         b2 = pid & 0xff # lower 8 bit
         # adaption_field=0x01, 0x02, 0x03:
-        b3 = af << 4
-        # continuity_counter:
-        # b3 = b3 | (continuity_counter & 0x0f)
+        b3 = (af << 4) | (ccounter & 0x0f)
         self._buffer.write('\x47')
         self._buffer.write(chr(b1))
         self._buffer.write(chr(b2))
@@ -502,7 +522,7 @@ if __name__=='__main__':
         fp.close()
         tag_type = s.read_uint8() & 0x1f
         if tag_type==8:
-            pass #aac.parse(s)
+            aac.parse(s)
         elif tag_type==9:
             print '#', i,
             h264.parse(s)
