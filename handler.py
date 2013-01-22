@@ -45,7 +45,7 @@ def to_pts_dts(pts):
     p1 = 0x0001 | ((pts >> 14) & 0xfffe)
     # xxxx xxxx | xxxx xxx1
     p2 = 0x0001 | ((pts << 1) & 0xfffe)
-    dts = pts - _PTS_OFFSET
+    dts = pts - 63000
     # '0001' DTS[32..30] '1' | DTS[29..22] | DTS[21..15] '1' | DTS[14..7] | DTS[6..0] '1'
     # 0001 xxx1 = 0x31, 0x0e
     d0 = 0x11 | ((dts >> 29) & 0x0e)
@@ -78,6 +78,7 @@ class TagCollector(object):
         self._tags = []
 
     def append(self, tag_type, is_iframe, timestamp, data):
+        print 'Append tag for', 'V' if tag_type==_TAG_TYPE_H264 else 'A', 'timestamp:', timestamp, 'size =', len(data)
         if self._tags and not is_iframe:
             last = self._tags[-1]
             if last.tag_type==tag_type and (last.length + len(data)) < 4100:
@@ -119,7 +120,7 @@ class TSWriter(object):
 
     def _create_pes(self, tag):
         pts = tag.timestamp * 90 + 126000
-        if tag.tag_type == _TAG_TYPE_H264:
+        if tag.tag_type == 1111: #_TAG_TYPE_H264:
             p0, p1, p2, d0, d1, d2 = to_pts_dts(pts)
             packet_length = len(tag.data) + 13
             # PES Start code 000001 | StreamID | Packet Length 16 bit | ignore 0x80 | flag 0xc0 | header_data_length 8 bit = 0x0a | PTS 5 bytes | DTS 5 bytes | payload body...
@@ -238,7 +239,7 @@ class H264Parser(TSWriter):
             nalus = []
             nalus.extend(self._sps)
             nalus.extend(self._pps)
-            self._tag_collector.append(_TAG_TYPE_H264, False, ts, ''.join(nalus))
+            self._tag_collector.append(_TAG_TYPE_H264, True, ts, ''.join(nalus))
         elif AVCPacketType==1:
             # One or more NALUs (Full frames are required)
             self._tag_collector.append(_TAG_TYPE_H264, frameType==_FLV_KEY_FRAME, ts, self._parse_NALUs(s))
@@ -763,6 +764,6 @@ if __name__=='__main__':
     for tag in ts._tag_collector._tags:
         if tag.tag_type == _TAG_TYPE_AAC:
             ts._aacparser.writeTS(f, tag)
-        #if tag.tag_type == _TAG_TYPE_H264:
-        #    ts._h264parser.writeTS(f, tag)
+        if tag.tag_type == _TAG_TYPE_H264:
+            ts._h264parser.writeTS(f, tag)
     f.close()
