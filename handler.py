@@ -34,7 +34,7 @@ def to_pts_only(pts):
     p1 = 0x0001 | ((pts >> 14) & 0xfffe)
     # xxxx xxxx | xxxx xxx1
     p2 = 0x0001 | ((pts << 1) & 0xfffe)
-    # >BII
+    # >BHH
     return (p0, p1, p2)
 
 def to_pts_dts(pts):
@@ -45,6 +45,7 @@ def to_pts_dts(pts):
     p1 = 0x0001 | ((pts >> 14) & 0xfffe)
     # xxxx xxxx | xxxx xxx1
     p2 = 0x0001 | ((pts << 1) & 0xfffe)
+    dts = pts - _PTS_OFFSET
     # '0001' DTS[32..30] '1' | DTS[29..22] | DTS[21..15] '1' | DTS[14..7] | DTS[6..0] '1'
     # 0001 xxx1 = 0x31, 0x0e
     d0 = 0x11 | ((dts >> 29) & 0x0e)
@@ -52,7 +53,7 @@ def to_pts_dts(pts):
     d1 = 0x0001 | ((dts >> 14) & 0xfffe)
     # xxxx xxxx | xxxx xxx1
     d2 = 0x0001 | ((dts << 1) & 0xfffe)
-    # >BIIBII
+    # >BHHBHH
     return (p0, p1, p2, d0, d1, d2)
 
 class TagData(object):
@@ -79,7 +80,7 @@ class TagCollector(object):
     def append(self, tag_type, is_iframe, timestamp, data):
         if self._tags and not is_iframe:
             last = self._tags[-1]
-            if last.tag_type==tag_type and (last.length + len(data)) < 2804:
+            if last.tag_type==tag_type and (last.length + len(data)) < 4100:
                 last.append(data)
                 return
         self._tags.append(TagData(tag_type, is_iframe, timestamp, data))
@@ -94,19 +95,123 @@ class TagCollector(object):
         self._tags = self._tags[n:]
         return L
 
-class H264Parser(object):
+def hexline(s):
+    n = 0
+    for ch in s:
+        n = n + 1
+        s = hex(ord(ch))[2:] # remove prefix '0x'
+        if len(s)==1:
+            s = '0' + s
+        print s,
+        if n % 16==0:
+            print
+    print
 
-    def __init__(self, tag_collector):
-        self._tag_collector = tag_collector
-        self._pps = []
-        self._sps = []
-        self._nalu_length_size = 0
+class TSWriter(object):
+
+    def __init__(self, pid, stream_id):
+        self._ccounter = 0x00
+        self._pid = pid
+        self._stream_id = stream_id
 
     def reset_ccounter(self):
         self._ccounter = 0
 
+    def _create_pes(self, tag):
+        pts = tag.timestamp * 90 + 126000
+        if tag.tag_type == _TAG_TYPE_H264:
+            p0, p1, p2, d0, d1, d2 = to_pts_dts(pts)
+            packet_length = len(tag.data) + 13
+            # PES Start code 000001 | StreamID | Packet Length 16 bit | ignore 0x80 | flag 0xc0 | header_data_length 8 bit = 0x0a | PTS 5 bytes | DTS 5 bytes | payload body...
+            return struct.pack('>BBBBHBBBBHHBHH', 0x00, 0x00, 0x01, self._stream_id, packet_length, 0x80, 0xc0, 0x0a, p0, p1, p2, d0, d1, d2) + tag.data
+        else:
+            p0, p1, p2 = to_pts_only(pts)
+            packet_length = len(tag.data) + 8
+            print 'Data length:', len(tag.data), 'Packet:', packet_length
+            # PES Start code 000001 | StreamID | Packet Length 16 bit | ignore 0x80 | flag 0x80 | header_data_length 8 bit = 0x05 | PTS 5 bytes | payload body...
+            return struct.pack('>BBBBHBBBBHH', 0x00, 0x00, 0x01, self._stream_id, packet_length, 0x80, 0x80, 0x05, p0, p1, p2) + tag.data
+
     def writeTS(self, fp, tag):
-        pass
+        print '# write ts for video?', tag.tag_type==_TAG_TYPE_H264, ', timestamp:', tag.timestamp
+        pusi = True
+        pes = self._create_pes(tag)
+        print 'PES header:'
+        hexline(pes[:14])
+        data_remaining = pes_length = len(pes)
+        pcr_base = tag.timestamp * 90 + 63000
+        pcr_ext = (tag.timestamp * 270) % 300
+        while data_remaining > 0:
+            fp.write('\x47')
+            ts_remaining = 187
+            fill_ffs = 0
+            if pusi:
+                pusi = False
+                # error_indicator = 0 | payload_unit_start_indicator = 1 | transport_priority = 0 | PID = 13 bit
+                # 010x xxxx | xxxx xxxx
+                i16 = 0x4000 | (self._pid & 0x1fff)
+                # scrambling_control = 00 | adaptation_field_control = 11 | continuity_counter = 4 bit
+                # 0011 xxxx
+                i8 = 0x30 | self._ccounter
+                # adaption field length = ?
+                af_length = 0x07
+                # flag = DI, RI, EI, PCR_F, OPCR_F, SF, TF, AF = 01010000 = 0x50
+                flag = 0x50
+                # PCR_base 33 bit | reserved = 6 bit | PCR_extension = 9 bit
+                # xxxx xxxx | xxxx xxxx | xxxx xxxx | xxxx xxxx | x111 111x | xxxx xxxx
+                pcr32_1 = pcr_base >> 1
+                pcr8_2 = (pcr_base & 0x01 << 7) | 0x7e | ((pcr_ext >> 8) & 0x01)
+                pcr8_3 = pcr_ext & 0xff
+                ts_remaining = ts_remaining - 11
+                if ts_remaining > data_remaining:
+                    # not enough data, so add af_length and fill with 0xff...
+                    fill_ffs = ts_remaining - data_remaining
+                    af_length = af_length + fill_ffs
+                fp.write(struct.pack('>HBBBLBB', i16, i8, af_length, flag, pcr32_1, pcr8_2, pcr8_3))
+                if fill_ffs > 0:
+                    fp.write('\xff' * fill_ffs)
+                    ts_remaining = ts_remaining - fill_ffs
+                fp.write(pes[pes_length - data_remaining : pes_length - data_remaining + ts_remaining])
+                data_remaining = data_remaining - ts_remaining
+            else:
+                # error_indicator = 0 | payload_unit_start_indicator = 0 | transport_priority = 0 | PID = 13 bit
+                # 000x xxxx | xxxx xxxx
+                i16 = 0x1fff & (self._pid & 0x1fff)
+                fp.write(chr(i16 >> 8))
+                fp.write(chr(i16 & 0xff))
+                ts_remaining = ts_remaining - 2
+                # should have adaption field?
+                if (ts_remaining - 1) <= data_remaining:
+                    # no adaption field: transport_scrambling_control = 00 | adaptation_field_control = 01 | continuity_counter
+                    fp.write(chr(0x10 | self._ccounter))
+                    ts_remaining = ts_remaining - 1
+                    fp.write(pes[pes_length - data_remaining : pes_length - data_remaining + ts_remaining])
+                    data_remaining = data_remaining - ts_remaining
+                else:
+                    # must have at least 1 byte of adaption field: transport_scrambling_control = 00 | adaptation_field_control = 11 | continuity_counter
+                    fp.write(chr(0x30 | self._ccounter))
+                    ts_remaining = ts_remaining - 1
+                    af_length = ts_remaining - data_remaining - 1
+                    fp.write(chr(af_length))
+                    ts_remaining = ts_remaining - 1 - af_length
+                    if af_length > 0:
+                        # write flag and extra 0xff...
+                        fp.write('\x00')
+                        af_length = af_length - 1
+                        while af_length > 0:
+                            fp.write('\xff')
+                            af_length = af_length - 1
+                    fp.write(pes[pes_length - data_remaining : pes_length - data_remaining + ts_remaining])
+                    data_remaining = data_remaining - ts_remaining
+            self._ccounter = (self._ccounter + 1) & 0x0f
+
+class H264Parser(TSWriter):
+
+    def __init__(self, tag_collector):
+        super(H264Parser, self).__init__(_VIDEO_PID, 0xe0)
+        self._tag_collector = tag_collector
+        self._pps = []
+        self._sps = []
+        self._nalu_length_size = 0
 
     def parse(self, s):
         #print '---------- H264 ----------'
@@ -129,6 +234,11 @@ class H264Parser(object):
             # This contains the same information that would be stored in an avcC box in an MP4/FLV file.
             print 'Parse AVCDecoderConfigurationRecord'
             self._parse_config_record(s)
+            # add SPS and PPS NALUs:
+            nalus = []
+            nalus.extend(self._sps)
+            nalus.extend(self._pps)
+            self._tag_collector.append(_TAG_TYPE_H264, False, ts, ''.join(nalus))
         elif AVCPacketType==1:
             # One or more NALUs (Full frames are required)
             self._tag_collector.append(_TAG_TYPE_H264, frameType==_FLV_KEY_FRAME, ts, self._parse_NALUs(s))
@@ -184,9 +294,9 @@ class H264Parser(object):
         else:
             length = s.read_uint8()
         data_available = s.available()
-        if data_available!=length:
+        if data_available<length:
             raise FLVError('bad NALU length.')
-        return '\x00\x00\x00\x01' + s.left()
+        return '\x00\x00\x00\x01' + s.read_bytes(length)
 
 # AAC ADTS Header 7 bytes
 # syncword, ID, layer, protection_absent
@@ -195,99 +305,12 @@ class H264Parser(object):
 # aac_frame_length, buffer_fullness, number_of_raw_data_blocks
 # | ppss sspc ccoh ccll llll llll lllb bbbb bbbb bbnn |
 
-class AACParser(object):
+class AACParser(TSWriter):
 
     def __init__(self, tag_collector):
+        super(AACParser, self).__init__(_AUDIO_PID, 0xc0)
         self._tag_collector = tag_collector
         self._adts_header = None
-        self._debug = open('/Users/michael/Github/rtmp-livestreaming/tmp/debug.aac', 'w+b')
-
-    def reset_ccounter(self):
-        self._ccounter = 0
-
-    def writeTS(self, fp, tag):
-        print '# write aac ts, timestamp:', tag.timestamp
-        pts = tag.timestamp * 90 + 126000
-        pusi = True
-        p0, p1, p2 = to_pts_only(pts)
-        packet_length = len(tag.data) + 8
-        # PES Start code 000001 | StreamID 0xc0 | Packet Length 16 bit | ignore 0x80 | flag 0x80 | header_data_length 8 bit = 0x05 | PTS 5 bytes | payload body...
-        pes = struct.pack('>BBBBHBBBBHH', 0x00, 0x00, 0x01, 0xc0, packet_length, 0x80, 0x80, 0x05, p0, p1, p2) + tag.data
-        print 'PES:', len(pes), 'Packet Length:', packet_length, 'Data:', len(tag.data)
-        data_remaining = pes_length = len(pes)
-        pcr = tag.timestamp * 90 + 63000
-        pcr_ext = (tag.timestamp * 270) % 300
-        print 'PCR_BASE:', pcr, 'PTS:', pts
-        while data_remaining > 0:
-            print 'still have %s bytes in PES...' % data_remaining
-            fp.write('\x47')
-            ts_remaining = 187
-            fill_ffs = 0
-            if pusi:
-                pusi = False
-                # transport_error_indicator = 0 | payload_unit_start_indicator = 1 | transport_priority = 0 | PID = 13 bit
-                # 010x xxxx | xxxx xxxx
-                i16 = 0x4101 # 0x4000 | (_AUDIO_PID & 0x1fff)
-                # transport_scrambling_control = 00 | adaptation_field_control = 11 | continuity_counter = 4 bit
-                # 0011 xxxx
-                i8 = 0x30 | self._ccounter
-                # adaption field length = ?
-                af_length = 0x07
-                # flag = DI, RI, EI, PCR_F, OPCR_F, SF, TF, AF = 01010000 = 0x50
-                flag = 0x50
-                # PCR_base 33 bit | reserved = 6 bit | PCR_extension = 9 bit
-                # xxxx xxxx | xxxx xxxx | xxxx xxxx | xxxx xxxx | x111 111x | xxxx xxxx
-                pcr32_1 = pcr >> 1
-                pcr8_2 = (pcr & 0x01 << 7) | 0x7e | ((pcr_ext >> 8) & 0x01)
-                pcr8_3 = pcr_ext & 0xff
-                ts_remaining = ts_remaining - 11
-                if ts_remaining > data_remaining:
-                    # not enough data, so add af_length and fill with 0xff...
-                    fill_ffs = ts_remaining - data_remaining
-                    af_length = af_length + fill_ffs
-                    print 'af_length change to', af_length
-                fp.write(struct.pack('>HBBBLBB', i16, i8, af_length, flag, pcr32_1, pcr8_2, pcr8_3))
-                if fill_ffs > 0:
-                    print 'write %s 0xff...' % fill_ffs
-                    fp.write('\xff' * fill_ffs)
-                    ts_remaining = ts_remaining - fill_ffs
-                print 'ts ts_remaining:', ts_remaining
-                fp.write(pes[pes_length - data_remaining : pes_length - data_remaining + ts_remaining])
-                data_remaining = data_remaining - ts_remaining
-            else:
-                # transport_error_indicator = 0 | payload_unit_start_indicator = 0 | transport_priority = 0 | PID = 13 bit
-                # 000x xxxx | xxxx xxxx
-                i16 = 0x0101 # 0x1fff & (_AUDIO_PID & 0x1fff)
-                fp.write(chr(i16 >> 8))
-                fp.write(chr(i16 & 0xff))
-                ts_remaining = ts_remaining - 2
-                # should have adaption field?
-                print 'should have AF?', ts_remaining, data_remaining
-                if (ts_remaining - 1) <= data_remaining:
-                    # no adaption field: transport_scrambling_control = 00 | adaptation_field_control = 01 | continuity_counter
-                    fp.write(chr(0x10 | self._ccounter))
-                    ts_remaining = ts_remaining - 1
-                    fp.write(pes[pes_length - data_remaining : pes_length - data_remaining + ts_remaining])
-                    data_remaining = data_remaining - ts_remaining
-                else:
-                    # must have at least 1 byte of adaption field: transport_scrambling_control = 00 | adaptation_field_control = 11 | continuity_counter
-                    fp.write(chr(0x30 | self._ccounter))
-                    ts_remaining = ts_remaining - 1
-                    print 'ts_remaining:', ts_remaining, 'data_remaining:', data_remaining
-                    af_length = ts_remaining - data_remaining - 1
-                    print 'af_length:', af_length
-                    fp.write(chr(af_length))
-                    ts_remaining = ts_remaining - 1 - af_length
-                    if af_length > 0:
-                        # write flag and extra 0xff...
-                        fp.write('\x00')
-                        af_length = af_length - 1
-                        while af_length > 0:
-                            fp.write('\xff')
-                            af_length = af_length - 1
-                    fp.write(pes[pes_length - data_remaining : pes_length - data_remaining + ts_remaining])
-                    data_remaining = data_remaining - ts_remaining
-            self._ccounter = (self._ccounter + 1) & 0x0f
 
     def parse(self, s):
         #print '---------- AAC ----------'
@@ -310,8 +333,6 @@ class AACParser(object):
             if self._adts_header:
                 raw = self._parse_aac_raw(s)
                 self._tag_collector.append(_TAG_TYPE_AAC, False, ts, raw)
-                #self._debug.write('\x00\x00\x00\x00\x00\x00\x00\x00')
-                self._debug.write(raw)
             else:
                 print 'ERROR: no adts header but meet raw!'
         return ts
@@ -481,7 +502,7 @@ class TsHandler(object):
         self._pmt = ps.getvalue()
         self._start_timestamp = None
 
-    def processTag(self, data):
+    def processTag(self, data, processVideo=True, processAudio=True):
         self._counter = self._counter + 1
         #fp = open('/Users/michael/Github/rtmp-livestreaming/tmp/flv/%05d.tag' % self._counter, 'w+b')
         #fp.write(data)
@@ -490,10 +511,10 @@ class TsHandler(object):
         tag_type = s.read_uint8() & 0x1f
         ts = 0
         is_iframe = False
-        if tag_type==_TAG_TYPE_AAC:
+        if tag_type == _TAG_TYPE_AAC and processAudio:
             ts = self._aacparser.parse(s)
-        #elif tag_type==_TAG_TYPE_H264:
-        #    ts, is_iframe = self._h264parser.parse(s)
+        elif tag_type == _TAG_TYPE_H264 and processVideo:
+            ts, is_iframe = self._h264parser.parse(s)
         else:
             return
         if True:
@@ -725,9 +746,10 @@ def crc32(data):
 if __name__=='__main__':
     index = 0
     ts = TsHandler()
-    while True: #and index < 318:
+    while True:
         index = index + 1
-        f = '/Users/michael/Github/rtmp-livestreaming/tmp/flv/%05d.tag' % index
+        f = '/Users/michael/Github/rtmp-livestreaming/tmp/ad/tags/%03d.tag' % index
+        #f = '/Users/michael/Github/rtmp-livestreaming/tmp/flv/%05d.tag' % index
         if os.path.isfile(f):
             print 'Process tag %d ...' % index
             with open(f, 'r+b') as fp:
@@ -735,11 +757,12 @@ if __name__=='__main__':
                 ts.processTag(tag)
         else:
             break
-    f = open('/Users/michael/Github/rtmp-livestreaming/tmp/debug-extract-aac.ts', 'w+b')
+    f = open('/Users/michael/Github/rtmp-livestreaming/tmp/ad/debug-extract-all.ts', 'w+b')
     f.write(ts._pat)
     f.write(ts._pmt)
-    ts._aacparser.reset_ccounter()
     for tag in ts._tag_collector._tags:
-        if tag.tag_type==_TAG_TYPE_AAC:
+        if tag.tag_type == _TAG_TYPE_AAC:
             ts._aacparser.writeTS(f, tag)
-    ts._aacparser._debug.close()
+        #if tag.tag_type == _TAG_TYPE_H264:
+        #    ts._h264parser.writeTS(f, tag)
+    f.close()
