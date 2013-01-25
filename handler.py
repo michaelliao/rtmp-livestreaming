@@ -214,6 +214,8 @@ class H264Parser(TSWriter):
         self._sps = []
         self._nalu_length_size = 0
 
+        self._debug = open('/Users/michael/Github/rtmp-livestreaming/tmp/ad/debug-video-only.h264', 'wb')
+
     def parse(self, s):
         #print '---------- H264 ----------'
         length = s.read_uint24()
@@ -239,10 +241,23 @@ class H264Parser(TSWriter):
             nalus = []
             nalus.extend(self._sps)
             nalus.extend(self._pps)
-            self._tag_collector.append(_TAG_TYPE_H264, True, ts, ''.join(nalus))
+            nalus_data = ''.join(nalus)
+            self._tag_collector.append(_TAG_TYPE_H264, True, ts, nalus_data)
+            self._debug.write(nalus_data)
+            global g_index
+            f = open('/Users/michael/Github/rtmp-livestreaming/tmp/ad/tags/%03d.h264' % g_index, 'wb')
+            f.write(nalus_data)
+            f.close()
         elif AVCPacketType==1:
             # One or more NALUs (Full frames are required)
-            self._tag_collector.append(_TAG_TYPE_H264, frameType==_FLV_KEY_FRAME, ts, self._parse_NALUs(s))
+            nalus = self._parse_NALUs(s)
+            nalus_data = ''.join(nalus)
+            self._tag_collector.append(_TAG_TYPE_H264, frameType==_FLV_KEY_FRAME, ts, nalus_data)
+            #self._debug.write(nalus_data)
+            global g_index
+            f = open('/Users/michael/Github/rtmp-livestreaming/tmp/ad/tags/%03d.h264' % g_index, 'wb')
+            f.write(nalus_data)
+            f.close()
         elif AVCPacketType==2:
             # end of video:
             print 'END of video'
@@ -278,26 +293,29 @@ class H264Parser(TSWriter):
             print 'ppsNALU:', hex(ord(ppsNALU[0]))
             self._pps.append('\x00\x00\x00\x01' + ppsNALU)
         self._nalu_length_size = length_size_minus_one + 1
-        print 'data available:', s.available()
 
     def _parse_NALUs(self, s):
         nalu_length_size = self._nalu_length_size
         if nalu_length_size==0:
             raise FLVError('Cannot parse NALU because AVCDecoderConfigurationRecord was not parsed.')
-        # the max value of nalu_length_size is 4 (=0x03 + 1)
-        length = 0
-        if nalu_length_size==4:
-            length = s.read_uint32()
-        elif nalu_length_size==3:
-            length = s.read_uint24()
-        elif nalu_length_size==2:
-            length = s.read_uint16()
-        else:
-            length = s.read_uint8()
-        data_available = s.available()
-        if data_available<length:
-            raise FLVError('bad NALU length.')
-        return '\x00\x00\x00\x01' + s.read_bytes(length)
+        L = []
+        # split each NALUs and add '00000001' for each NALUs:
+        while s.available() > 0:
+            # the max value of nalu_length_size is 4 (=0x03 + 1)
+            length = 0
+            if nalu_length_size==4:
+                length = s.read_uint32()
+            elif nalu_length_size==3:
+                length = s.read_uint24()
+            elif nalu_length_size==2:
+                length = s.read_uint16()
+            else:
+                length = s.read_uint8()
+            if s.available() < length:
+                raise FLVError('bad NALU length: %d' % length)
+            L.append('\x00\x00\x00\x01')
+            L.append(s.read_bytes(length))
+        return L
 
 # AAC ADTS Header 7 bytes
 # syncword, ID, layer, protection_absent
@@ -505,7 +523,7 @@ class TsHandler(object):
 
     def processTag(self, data, processVideo=True, processAudio=True):
         self._counter = self._counter + 1
-        #fp = open('/Users/michael/Github/rtmp-livestreaming/tmp/flv/%05d.tag' % self._counter, 'w+b')
+        #fp = open('/Users/michael/Github/rtmp-livestreaming/tmp/fmle/%05d.tag' % self._counter, 'w+b')
         #fp.write(data)
         #fp.close()
         s = BytesIO(data)
@@ -744,15 +762,16 @@ def crc32(data):
     b3 = i_crc & 0xff
     return '%s%s%s%s' % (chr(b0), chr(b1), chr(b2), chr(b3))
 
+g_index = 0
+
 if __name__=='__main__':
-    index = 0
     ts = TsHandler()
     while True:
-        index = index + 1
-        f = '/Users/michael/Github/rtmp-livestreaming/tmp/ad/tags/%03d.tag' % index
-        #f = '/Users/michael/Github/rtmp-livestreaming/tmp/flv/%05d.tag' % index
+        g_index = g_index + 1
+        f = '/Users/michael/Github/rtmp-livestreaming/tmp/ad/tags/%03d.tag' % g_index
+        #f = '/Users/michael/Github/rtmp-livestreaming/tmp/fmle/%05d.tag' % g_index
         if os.path.isfile(f):
-            print 'Process tag %d ...' % index
+            print 'Process tag %d ...' % g_index
             with open(f, 'r+b') as fp:
                 tag = fp.read()
                 ts.processTag(tag)
@@ -767,3 +786,4 @@ if __name__=='__main__':
         if tag.tag_type == _TAG_TYPE_H264:
             ts._h264parser.writeTS(f, tag)
     f.close()
+    ts._h264parser._debug.close()
