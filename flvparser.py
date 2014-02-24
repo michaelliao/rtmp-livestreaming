@@ -289,7 +289,7 @@ class H264Parser(object):
             #self._output.write('\x00\x00\x00\x01')
             #self._output.write(ppsNALU)
         self._nalu_length_size = length_size_minus_one + 1
-        print 'data available:', s.available()
+        print 'data available shoud be 0:', s.available()
 
     def _parse_NALUs(self, s):
         nalu_length_size = self._nalu_length_size
@@ -311,8 +311,6 @@ class H264Parser(object):
             raise FLVError('bad NALU length.')
         #self._output.write('\x00\x00\x00\x01')
         #self._output.write(s.left())
-        if data_available > 4:
-            print hex(s.read_uint8()), hex(s.read_uint8()), hex(s.read_uint8()), hex(s.read_uint8())
 
 def hexline(s):
     n = 0
@@ -511,23 +509,28 @@ def crc32(data):
     return '%s%s%s%s' % (chr(b0), chr(b1), chr(b2), chr(b3))
 
 if __name__=='__main__':
-    aac_fp = open('/Users/michael/Github/rtmp-livestreaming/generated.aac', 'wb')
-    h264_fp = open('/Users/michael/Github/rtmp-livestreaming/generated-ts.ts', 'wb')
-    aac = AACParser(aac_fp)
-    h264 = H264Parser(h264_fp)
-    for i in range(791):
-        f = '/Users/michael/Github/rtmp-livestreaming/tmp/flvdebug-%d' % i
-        fp = open(f, 'rb')
-        s = BytesIO(fp.read())
-        fp.close()
-        tag_type = s.read_uint8() & 0x1f
-        if tag_type==8:
-            aac.parse(s)
-        elif tag_type==9:
-            print '#', i,
-            h264.parse(s)
-    aac_fp.close()
-    h264_fp.close()
-
-    import doctest
-    doctest.testmod()
+    f = open('/Users/michael/Github/rtmp-livestreaming/tmp/ad/m.flv', 'rb')
+    n = 0
+    f.read(13) # skip 13 bytes
+    while True:
+        tag_type = f.read(1)
+        if tag_type=='':
+            break
+        print '#', n, '--------'
+        b0 = f.read(1)
+        b1 = f.read(1)
+        b2 = f.read(1)
+        data_size = (ord(b0) << 16) + (ord(b1) << 8) + ord(b2)
+        dd = f.read(7) # timestamp 3 bytes, timestamp ext 1 byte, stream id 3 bytes
+        data = f.read(data_size)
+        f.read(4) # previous tag size
+        w = open('/Users/michael/Github/rtmp-livestreaming/tmp/ad/tags/%03d.tag' % n, 'wb')
+        w.write(tag_type)
+        w.write(b0)
+        w.write(b1)
+        w.write(b2)
+        w.write(dd)
+        w.write(data)
+        w.close()
+        n = n + 1
+    f.close()

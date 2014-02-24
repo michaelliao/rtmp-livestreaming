@@ -74,6 +74,7 @@ class TagData(object):
         return ''.join(self._data)
 
 class TagCollector(object):
+
     def __init__(self):
         self._tags = []
 
@@ -242,7 +243,7 @@ class H264Parser(TSWriter):
             nalus.extend(self._sps)
             nalus.extend(self._pps)
             nalus_data = ''.join(nalus)
-            self._tag_collector.append(_TAG_TYPE_H264, True, ts, nalus_data)
+            self._tag_collector.append(_TAG_TYPE_H264, False, ts, nalus_data)
             self._debug.write(nalus_data)
             global g_index
             f = open('/Users/michael/Github/rtmp-livestreaming/tmp/ad/tags/%03d.h264' % g_index, 'wb')
